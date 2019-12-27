@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:speech_recognition/speech_recognition.dart';
 import 'package:flutter_dialogflow/dialogflow_v2.dart';
+import 'package:flutter_tts/flutter_tts.dart';
+import 'package:speech_recognition/speech_recognition.dart';
 
 void main() {
   // set a dark status bar for iOS and Android
@@ -28,6 +29,8 @@ class MyApp extends StatelessWidget {
   }
 }
 
+enum TtsState { playing, stopped }
+
 class Home extends StatefulWidget {
   @override
   _HomeState createState() => _HomeState();
@@ -37,26 +40,92 @@ class _HomeState extends State<Home> {
   SpeechRecognition _speechRecognition;
   bool _isAvailable = false;
   bool _isListening = false;
+  FlutterTts flutterTts;
+  dynamic languages;
+  String language;
+  double volume = 0.5;
+  double pitch = 1.0;
+  double rate = 0.5;
 
-  final List<ChatMessage> _messages = <ChatMessage>[];
-  final TextEditingController _textController = new TextEditingController();
+  String _newVoiceText;
+
+  TtsState ttsState = TtsState.stopped;
+
+  get isPlaying => ttsState == TtsState.playing;
+
+  get isStopped => ttsState == TtsState.stopped;
+
+
+  final List<String> _messages = <String>[];
 
   String resultText = "";
 
   @override
   void initState() {
     super.initState();
+    // speech to text
     initSpeechRecognizer();
+
+    // text to speech
+    initTTS();
   }
 
   void startListening() {
     if (_isAvailable && !_isListening)
-      _speechRecognition
-          .listen(locale: "en_US")
-          .then((result) => () {
+      _speechRecognition.listen(locale: "en_US").then((result) => () {
             print('$result');
-            _handleSubmitted(result.toString());
           });
+  }
+
+  Future _getLanguages() async {
+    languages = await flutterTts.getLanguages;
+    if (languages != null) setState(() => languages);
+  }
+
+  Future _speak() async {
+
+    await flutterTts.setVolume(volume);
+    await flutterTts.setSpeechRate(rate);
+    await flutterTts.setPitch(pitch);
+
+    if (_newVoiceText != null) {
+      if (_newVoiceText.isNotEmpty) {
+        var result = await flutterTts.speak(_newVoiceText);
+        if (result == 1) setState(() => ttsState = TtsState.playing);
+      }
+    }
+  }
+
+  Future _stop() async{
+    var result = await flutterTts.stop();
+    if (result == 1) setState(() => ttsState = TtsState.stopped);
+  }
+
+  Future<void> initTTS() async {
+    flutterTts = FlutterTts();
+
+    _getLanguages();
+
+    flutterTts.setStartHandler(() {
+      setState(() {
+        print("playing");
+        ttsState = TtsState.playing;
+      });
+    });
+
+    flutterTts.setCompletionHandler(() {
+      setState(() {
+        print("Complete");
+        ttsState = TtsState.stopped;
+      });
+    });
+
+    flutterTts.setErrorHandler((msg) {
+      setState(() {
+        print("error");
+        ttsState = TtsState.stopped;
+      });
+    });
   }
 
   void initSpeechRecognizer() {
@@ -71,7 +140,10 @@ class _HomeState extends State<Home> {
     );
 
     _speechRecognition.setRecognitionResultHandler(
-      (String speech) => setState(() => resultText = speech),
+      (String speech) => setState(() {
+        resultText = speech;
+        _handleSubmitted(speech);
+      }),
     );
 
     _speechRecognition.setRecognitionCompleteHandler(
@@ -83,6 +155,46 @@ class _HomeState extends State<Home> {
             _isAvailable = result;
           }),
         );
+  }
+
+  void response(query) async {
+    // send to AI and get response
+    AuthGoogle authGoogle =
+    await AuthGoogle(fileJson: "assets/credentials.json").build();
+    Dialogflow dialogflow =
+    Dialogflow(authGoogle: authGoogle, language: Language.english);
+    AIResponse response = await dialogflow.detectIntent(query);
+
+    setState(() {
+      _messages.insert(0, response.getMessage() ?? "");
+    });
+
+    // send response from AI to TTS
+    setState(() {
+      _newVoiceText = response.getMessage() ?? "";
+    });
+    print(response.getMessage());
+
+    if (_isListening) {
+      _speechRecognition.cancel().then(
+            (result) =>
+            setState(() => _isListening = result),
+      );
+    }
+
+    await _speak();
+
+    if (_isAvailable && !_isListening) {
+      // start listening
+      startListening();
+    }
+  }
+
+  void _handleSubmitted(String text) {
+    setState(() {
+      _messages.insert(0, text);
+    });
+    response(text);
   }
 
   @override
@@ -129,108 +241,6 @@ class _HomeState extends State<Home> {
                 ],
               ),
             ]),
-      ),
-    );
-  }
-
-
-
-
-  void Response(query) async {
-    _textController.clear();
-    AuthGoogle authGoogle =
-    await AuthGoogle(fileJson: "assets/credentials.json")
-        .build();
-    Dialogflow dialogflow =
-    Dialogflow(authGoogle: authGoogle, language: Language.english);
-    AIResponse response = await dialogflow.detectIntent(query);
-    ChatMessage message = new ChatMessage(
-      text: response.getMessage() ??
-          new CardDialogflow(response.getListMessage()[0]).title,
-      name: "Bot",
-      type: false,
-    );
-    setState(() {
-      _messages.insert(0, message);
-    });
-  }
-
-  void _handleSubmitted(String text) {
-    _textController.clear();
-    ChatMessage message = new ChatMessage(
-      text: text,
-      name: "Promise",
-      type: true,
-    );
-    setState(() {
-      _messages.insert(0, message);
-    });
-    print('text');
-    Response(text);
-  }
-}
-
-class ChatMessage extends StatelessWidget {
-  ChatMessage({this.text, this.name, this.type});
-
-  final String text;
-  final String name;
-  final bool type;
-
-  List<Widget> otherMessage(context) {
-    return <Widget>[
-      new Container(
-        margin: const EdgeInsets.only(right: 16.0),
-        child: new CircleAvatar(child: new Text('B')),
-      ),
-      new Expanded(
-        child: new Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            new Text(this.name,
-                style: new TextStyle(fontWeight: FontWeight.bold)),
-            new Container(
-              margin: const EdgeInsets.only(top: 5.0),
-              child: new Text(text),
-            ),
-          ],
-        ),
-      ),
-    ];
-  }
-
-  List<Widget> myMessage(context) {
-    return <Widget>[
-      new Expanded(
-        child: new Column(
-          crossAxisAlignment: CrossAxisAlignment.end,
-          children: <Widget>[
-            new Text(this.name, style: Theme.of(context).textTheme.subhead),
-            new Container(
-              margin: const EdgeInsets.only(top: 5.0),
-              child: new Text(text),
-            ),
-          ],
-        ),
-      ),
-      new Container(
-        margin: const EdgeInsets.only(left: 16.0),
-        child: new CircleAvatar(
-            child: new Text(
-              this.name[0],
-              style: new TextStyle(fontWeight: FontWeight.bold),
-            )),
-      ),
-    ];
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return new Container(
-      margin: const EdgeInsets.symmetric(vertical: 10.0),
-      child: new Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: this.type ? myMessage(context) : otherMessage(context),
       ),
     );
   }
