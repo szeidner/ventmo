@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_dialogflow/dialogflow_v2.dart';
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:just_debounce_it/just_debounce_it.dart';
 import 'package:speech_recognition/speech_recognition.dart';
 
 void main() {
@@ -40,6 +41,7 @@ class _HomeState extends State<Home> {
   SpeechRecognition _speechRecognition;
   bool _isAvailable = false;
   bool _isListening = false;
+
   FlutterTts flutterTts;
   dynamic languages;
   String language;
@@ -48,13 +50,12 @@ class _HomeState extends State<Home> {
   double rate = 0.5;
 
   String _newVoiceText;
-
+  String _status = "Initializing...";
   TtsState ttsState = TtsState.stopped;
 
   get isPlaying => ttsState == TtsState.playing;
 
   get isStopped => ttsState == TtsState.stopped;
-
 
   final List<String> _messages = <String>[];
 
@@ -71,10 +72,12 @@ class _HomeState extends State<Home> {
   }
 
   void startListening() {
-    if (_isAvailable && !_isListening)
-      _speechRecognition.listen(locale: "en_US").then((result) => () {
-            print('$result');
-          });
+    if (_isAvailable && !_isListening) {
+      setState(() => _isListening = true);
+      _speechRecognition
+          .listen(locale: "en_US")
+          .then((result) => print('$result'));
+    }
   }
 
   Future _getLanguages() async {
@@ -83,7 +86,6 @@ class _HomeState extends State<Home> {
   }
 
   Future _speak() async {
-
     await flutterTts.setVolume(volume);
     await flutterTts.setSpeechRate(rate);
     await flutterTts.setPitch(pitch);
@@ -96,7 +98,7 @@ class _HomeState extends State<Home> {
     }
   }
 
-  Future _stop() async{
+  Future _stop() async {
     var result = await flutterTts.stop();
     if (result == 1) setState(() => ttsState = TtsState.stopped);
   }
@@ -107,10 +109,15 @@ class _HomeState extends State<Home> {
     _getLanguages();
 
     flutterTts.setStartHandler(() {
-      setState(() {
-        print("playing");
-        ttsState = TtsState.playing;
-      });
+      if (_isListening) {
+        _speechRecognition.cancel().then((result) => setState(() {
+              _isListening = false;
+              _status = "NOT LISTENING";
+            }));
+      }
+
+      print("playing");
+      ttsState = TtsState.playing;
     });
 
     flutterTts.setCompletionHandler(() {
@@ -118,6 +125,7 @@ class _HomeState extends State<Home> {
         print("Complete");
         ttsState = TtsState.stopped;
       });
+      startListening();
     });
 
     flutterTts.setErrorHandler((msg) {
@@ -125,6 +133,7 @@ class _HomeState extends State<Home> {
         print("error");
         ttsState = TtsState.stopped;
       });
+      startListening();
     });
   }
 
@@ -132,11 +141,23 @@ class _HomeState extends State<Home> {
     _speechRecognition = SpeechRecognition();
 
     _speechRecognition.setAvailabilityHandler(
-      (bool result) => setState(() => _isAvailable = result),
+      (bool result) {
+        setState(() => _isAvailable = result);
+        if (result) {
+          setState(() => _status = "AVAILABLE");
+        } else {
+          setState(() => _status = "NOT AVAILABLE");
+        }
+      },
     );
 
     _speechRecognition.setRecognitionStartedHandler(
-      () => setState(() => _isListening = true),
+      () {
+        setState(() {
+          _isListening = true;
+          _status = "LISTENING";
+        });
+      },
     );
 
     _speechRecognition.setRecognitionResultHandler(
@@ -147,54 +168,54 @@ class _HomeState extends State<Home> {
     );
 
     _speechRecognition.setRecognitionCompleteHandler(
-      () => setState(() => _isListening = false),
+      () {
+        setState(() {
+          _isListening = false;
+          _status = "NOT LISTENING";
+        });
+      },
     );
 
-    _speechRecognition.activate().then(
-          (result) => setState(() {
-            _isAvailable = result;
-          }),
-        );
+    _speechRecognition.activate().then((result) {
+      setState(() => _isAvailable = result);
+      if (result) {
+        startListening();
+      } else {
+        setState(() {
+          _status = "NOT AVAILABLE";
+        });
+      }
+      setState(() => _isAvailable = result);
+    });
   }
 
   void response(query) async {
+    print('Send to AI: $query');
+
     // send to AI and get response
     AuthGoogle authGoogle =
-    await AuthGoogle(fileJson: "assets/credentials.json").build();
+        await AuthGoogle(fileJson: "assets/credentials.json").build();
     Dialogflow dialogflow =
-    Dialogflow(authGoogle: authGoogle, language: Language.english);
+        Dialogflow(authGoogle: authGoogle, language: Language.english);
     AIResponse response = await dialogflow.detectIntent(query);
-
-    setState(() {
-      _messages.insert(0, response.getMessage() ?? "");
-    });
 
     // send response from AI to TTS
     setState(() {
       _newVoiceText = response.getMessage() ?? "";
     });
-    print(response.getMessage());
-
-    if (_isListening) {
-      _speechRecognition.cancel().then(
-            (result) =>
-            setState(() => _isListening = result),
-      );
-    }
+    print('Received from AI: ${response.getMessage()}');
 
     await _speak();
-
-    if (_isAvailable && !_isListening) {
-      // start listening
-      startListening();
-    }
   }
 
   void _handleSubmitted(String text) {
+    if (_messages.isNotEmpty && _messages.last == text) return;
+
     setState(() {
       _messages.insert(0, text);
     });
-    response(text);
+
+    Debounce.milliseconds(1000, response, [text]);
   }
 
   @override
@@ -202,9 +223,20 @@ class _HomeState extends State<Home> {
     return Scaffold(
       body: Container(
         child: Column(
-            mainAxisAlignment: MainAxisAlignment.end,
+            mainAxisAlignment: MainAxisAlignment.start,
             crossAxisAlignment: CrossAxisAlignment.center,
             children: <Widget>[
+              Center(
+                  child: Container(
+                padding: EdgeInsets.symmetric(
+                  vertical: 35.0,
+                ),
+                child: Text(
+                  _status,
+                  style: TextStyle(fontSize: 14.0),
+                  textAlign: TextAlign.center,
+                ),
+              )),
               Container(
                 width: MediaQuery.of(context).size.width * 0.8,
                 padding: EdgeInsets.symmetric(
@@ -216,30 +248,30 @@ class _HomeState extends State<Home> {
                   style: TextStyle(fontSize: 24.0),
                 ),
               ),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: <Widget>[
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 50.0),
-                    child: FloatingActionButton(
-                      child: Icon(Icons.mic),
-                      onPressed: () {
-                        if (_isAvailable && !_isListening) {
-                          // start listening
-                          startListening();
-                        } else if (_isListening) {
-                          // stop
-                          _speechRecognition.cancel().then(
-                                (result) =>
-                                    setState(() => _isListening = result),
-                              );
-                        }
-                      },
-                      backgroundColor: _isListening ? Colors.red : Colors.white,
-                    ),
-                  ),
-                ],
-              ),
+//              Row(
+//                mainAxisAlignment: MainAxisAlignment.center,
+//                children: <Widget>[
+//                  Padding(
+//                    padding: const EdgeInsets.only(bottom: 50.0),
+//                    child: FloatingActionButton(
+//                      child: Icon(Icons.mic),
+//                      onPressed: () {
+//                        if (_isAvailable && !_isListening) {
+//                          // start listening
+//                          startListening();
+//                        } else if (_isListening) {
+//                          // stop
+//                          _speechRecognition.cancel().then(
+//                                (result) =>
+//                                    setState(() => _isListening = result),
+//                              );
+//                        }
+//                      },
+//                      backgroundColor: _isListening ? Colors.red : Colors.white,
+//                    ),
+//                  ),
+//                ],
+//              ),
             ]),
       ),
     );
